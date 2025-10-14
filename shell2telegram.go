@@ -165,6 +165,38 @@ func getConfig() (commands Commands, appConfig Config, err error) {
 		commands[path] = command
 	}
 
+	// setup proxy from environment variables if not set via flags
+	if appConfig.proxyServer == "" {
+		// Try custom environment variables first
+		if proxyEnv := os.Getenv("PROXY_SERVER"); proxyEnv != "" {
+			appConfig.proxyServer = proxyEnv
+		} else if proxyEnv := os.Getenv("HTTP_PROXY"); proxyEnv != "" {
+			// Try standard HTTP_PROXY variable (uppercase)
+			appConfig.proxyServer = proxyEnv
+		} else if proxyEnv := os.Getenv("http_proxy"); proxyEnv != "" {
+			// Try standard http_proxy variable (lowercase)
+			appConfig.proxyServer = proxyEnv
+		} else if proxyEnv := os.Getenv("HTTPS_PROXY"); proxyEnv != "" {
+			// Try standard HTTPS_PROXY variable
+			appConfig.proxyServer = proxyEnv
+		} else if proxyEnv := os.Getenv("https_proxy"); proxyEnv != "" {
+			// Try standard https_proxy variable (lowercase)
+			appConfig.proxyServer = proxyEnv
+		}
+	}
+
+	// setup proxy credentials from environment variables if not set via flags
+	if appConfig.proxyUser == "" {
+		if proxyUser := os.Getenv("PROXY_USER"); proxyUser != "" {
+			appConfig.proxyUser = proxyUser
+		}
+	}
+	if appConfig.proxyPassword == "" {
+		if proxyPass := os.Getenv("PROXY_PASSWORD"); proxyPass != "" {
+			appConfig.proxyPassword = proxyPass
+		}
+	}
+
 	if appConfig.token == "" {
 		if appConfig.token = os.Getenv("TB_TOKEN"); appConfig.token == "" {
 			return commands, appConfig, fmt.Errorf("TB_TOKEN environment var not found. See https://core.telegram.org/bots#botfather for more information")
@@ -247,10 +279,13 @@ func createBotWithProxy(token string, config *Config) (*tgbotapi.BotAPI, error) 
 		return nil, fmt.Errorf("invalid proxy URL: %v", err)
 	}
 
-	// Add authentication if provided
-	if config.proxyUser != "" {
+	// Add authentication if provided via separate parameters
+	// or if not present in URL already
+	if proxyURL.User == nil && config.proxyUser != "" {
+		// Use credentials from flags/env variables
 		proxyURL.User = url.UserPassword(config.proxyUser, config.proxyPassword)
 	}
+	// If credentials are in URL (http://user:pass@proxy:8080), they are already parsed
 
 	// Create HTTP client with proxy
 	transport := &http.Transport{
