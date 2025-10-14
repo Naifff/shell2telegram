@@ -63,6 +63,9 @@ type Config struct {
 	shell                  string   // custom shell
 	cache                  int      // caching command out (in seconds)
 	shTimeout              int      // timeout for execute shell command (in seconds)
+	proxyServer            string   // proxy server address (host:port or http://host:port)
+	proxyUser              string   // proxy username
+	proxyPassword          string   // proxy password
 	addExit                bool     // adding /shell2telegram exit command
 	allowAll               bool     // allow all user (DANGEROUS!)
 	logCommands            bool     // logging all commands
@@ -105,6 +108,9 @@ func getConfig() (commands Commands, appConfig Config, err error) {
 	flag.IntVar(&appConfig.shTimeout, "sh-timeout", 0, "set timeout for execute shell command (in `seconds`)")
 	flag.StringVar(&appConfig.shell, "shell", "sh", "custom shell or \"\" for execute without shell")
 	flag.BoolVar(&appConfig.oneThread, "one-thread", false, "run each shell command in one thread")
+	flag.StringVar(&appConfig.proxyServer, "proxy-server", "", "proxy server `address` (host:port or http://host:port)")
+	flag.StringVar(&appConfig.proxyUser, "proxy-user", "", "proxy `username`")
+	flag.StringVar(&appConfig.proxyPassword, "proxy-password", "", "proxy `password`")
 	logFilename := flag.String("log", "", "log `filename`, default - STDOUT")
 	predefinedAllowedUsers := flag.String("allow-users", "", "telegram users who are allowed to chat with the bot (\"user1,user2\")")
 	predefinedRootUsers := flag.String("root-users", "", "telegram users, who confirms new users in their private chat (\"user1,user2\")")
@@ -223,13 +229,55 @@ func sendMessage(messageSignal chan<- BotMessage, chatID int, message []byte, is
 }
 
 // ----------------------------------------------------------------------------
+// createBotWithProxy - create bot with optional proxy support
+func createBotWithProxy(token string, config *Config) (*tgbotapi.BotAPI, error) {
+	if config.proxyServer == "" {
+		// No proxy configured, use default client
+		return tgbotapi.NewBotAPI(token)
+	}
+
+	// Configure proxy
+	proxyURLStr := config.proxyServer
+	if !strings.HasPrefix(proxyURLStr, "http://") && !strings.HasPrefix(proxyURLStr, "https://") {
+		proxyURLStr = "http://" + proxyURLStr
+	}
+
+	proxyURL, err := url.Parse(proxyURLStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid proxy URL: %v", err)
+	}
+
+	// Add authentication if provided
+	if config.proxyUser != "" {
+		proxyURL.User = url.UserPassword(config.proxyUser, config.proxyPassword)
+	}
+
+	// Create HTTP client with proxy
+	transport := &http.Transport{
+		Proxy: http.ProxyURL(proxyURL),
+	}
+	httpClient := &http.Client{
+		Transport: transport,
+	}
+
+	// Create bot with custom HTTP client
+	bot, err := tgbotapi.NewBotAPIWithClient(token, httpClient)
+	if err != nil {
+		return nil, err
+	}
+
+	log.Printf("Using proxy server: %s", config.proxyServer)
+	return bot, nil
+}
+
+// ----------------------------------------------------------------------------
 func main() {
 	commands, appConfig, err := getConfig()
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	bot, err := tgbotapi.NewBotAPI(appConfig.token)
+	bot, err := createBotWithProxy(appConfig.token, &appConfig)
 	if err != nil {
 		log.Fatal(err)
 	}
