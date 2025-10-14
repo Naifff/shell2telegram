@@ -84,8 +84,30 @@ The bot accepts command pairs as arguments:
 shell2telegram [options] /telegram_command 'shell command' /command2 'shell command2'
 ```
 
-Key environment variable:
+### Environment Variables
+
+The bot automatically reads the following environment variables:
+
+**Bot Configuration:**
 - `TB_TOKEN`: Telegram bot token (required, from BotFather)
+
+**Proxy Configuration (automatically detected, priority order):**
+1. Command-line flags: `-proxy-server`, `-proxy-user`, `-proxy-password` (highest priority)
+2. Custom variables: `PROXY_SERVER`, `PROXY_USER`, `PROXY_PASSWORD`
+3. Standard variables: `HTTP_PROXY`, `http_proxy`, `HTTPS_PROXY`, `https_proxy`
+
+The proxy URL can include credentials: `http://user:pass@proxy:8080`
+
+**Example:**
+```bash
+export PROXY_SERVER=proxy.company.com:8080
+export PROXY_USER=username
+export PROXY_PASSWORD=password
+export TB_TOKEN=your_token
+
+# Proxy is automatically used - no flags needed!
+shell2telegram /date 'date'
+```
 
 ## Testing
 

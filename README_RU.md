@@ -88,9 +88,23 @@ shell2telegram.exe /date "date /t" /time "time /t"
 
 | Параметр | Описание | Пример |
 |----------|----------|--------|
-| `-proxy-server` | Адрес прокси-сервера | `-proxy-server=proxy.company.com:8080` |
-| `-proxy-user` | Имя пользователя для прокси | `-proxy-user=username` |
-| `-proxy-password` | Пароль для прокси | `-proxy-password=password` |
+| `-proxy-server` | Адрес прокси-сервера (опционально, если установлена переменная окружения) | `-proxy-server=proxy.company.com:8080` |
+| `-proxy-user` | Имя пользователя для прокси (опционально, если установлена переменная окружения) | `-proxy-user=username` |
+| `-proxy-password` | Пароль для прокси (опционально, если установлена переменная окружения) | `-proxy-password=password` |
+
+**⚡ АВТОМАТИЧЕСКОЕ использование переменных окружения:**
+
+Вместо параметров командной строки можно использовать переменные окружения (более безопасно):
+
+| Переменная | Альтернатива | Приоритет |
+|------------|--------------|-----------|
+| `PROXY_SERVER` | Кастомная переменная | 2 |
+| `PROXY_USER` | Кастомная переменная | - |
+| `PROXY_PASSWORD` | Кастомная переменная | - |
+| `HTTP_PROXY` или `http_proxy` | Стандартная переменная (может содержать учетные данные) | 3-4 |
+| `HTTPS_PROXY` или `https_proxy` | Стандартная переменная | 5-6 |
+
+**Приоритет:** Параметры командной строки (1) > Кастомные переменные (2) > Стандартные переменные (3-6)
 
 ### Параметры для webhook
 
@@ -103,36 +117,62 @@ shell2telegram.exe /date "date /t" /time "time /t"
 
 Если ваш сервер работает за корпоративным прокси (типично для Windows Server в корпоративной сети):
 
-**Без авторизации:**
-```cmd
-shell2telegram.exe -proxy-server=proxy.company.com:8080 -tb-token=YOUR_TOKEN /ping "ping 8.8.8.8 -n 4"
-```
+### ⚡ Способ 1: Переменные окружения (РЕКОМЕНДУЕТСЯ!)
 
-**С авторизацией:**
-```cmd
-shell2telegram.exe -proxy-server=proxy.company.com:8080 -proxy-user=username -proxy-password=password -tb-token=YOUR_TOKEN /date "date /t"
-```
+**Программа АВТОМАТИЧЕСКИ использует переменные окружения - не нужно передавать их в параметрах!**
 
-**Безопасный способ (через bat-файл):**
 ```cmd
 @echo off
-REM start_bot.bat
-set TB_TOKEN=ваш_токен
+REM Установите переменные окружения
 set PROXY_SERVER=proxy.company.com:8080
 set PROXY_USER=username
-set PROXY_PASSWORD=password
+set PROXY_PASSWORD=your_password
+set TB_TOKEN=your_bot_token
 
+REM Запуск - прокси используется АВТОМАТИЧЕСКИ!
 shell2telegram.exe ^
-    -proxy-server=%PROXY_SERVER% ^
-    -proxy-user=%PROXY_USER% ^
-    -proxy-password=%PROXY_PASSWORD% ^
     -log-commands ^
-    -log=bot.log ^
     -persistent-users ^
     /status "systeminfo | findstr /C:\"System Up Time\"" ^
     /disk "wmic logicaldisk get caption,freespace,size /format:list" ^
     /services "net start"
 ```
+
+**Linux/Mac:**
+```bash
+# Установите переменные
+export PROXY_SERVER=proxy.company.com:8080
+export PROXY_USER=username
+export PROXY_PASSWORD=password
+export TB_TOKEN=your_token
+
+# Запуск - прокси используется автоматически!
+./shell2telegram /status 'uptime' /disk 'df -h'
+```
+
+### Способ 2: Стандартные переменные (совместимость)
+
+```cmd
+REM Можно использовать стандартные переменные HTTP_PROXY
+set HTTP_PROXY=http://username:password@proxy.company.com:8080
+set TB_TOKEN=your_token
+
+shell2telegram.exe /date "date /t"
+```
+
+### Способ 3: Параметры командной строки (менее безопасно)
+
+**Без авторизации:**
+```cmd
+shell2telegram.exe -proxy-server=proxy.company.com:8080 /ping "ping 8.8.8.8 -n 4"
+```
+
+**С авторизацией:**
+```cmd
+shell2telegram.exe -proxy-server=proxy.company.com:8080 -proxy-user=username -proxy-password=password /date "date /t"
+```
+
+⚠️ **Внимание:** Пароли в параметрах командной строки видны в списке процессов. Используйте переменные окружения!
 
 ## 🎯 Модификаторы команд
 
@@ -195,10 +235,13 @@ shell2telegram /whoami 'echo "Вы: $S2T_USERNAME (@$S2T_LOGIN), ID: $S2T_USERID
 ### 1. 🖥️ Мониторинг Windows Server
 
 ```cmd
+REM Установите переменные окружения (прокси будет использован автоматически!)
+set PROXY_SERVER=proxy.company.com:8080
+set PROXY_USER=username
+set PROXY_PASSWORD=password
+set TB_TOKEN=your_token
+
 shell2telegram.exe ^
-    -proxy-server=proxy:8080 ^
-    -proxy-user=user ^
-    -proxy-password=pass ^
     -root-users=admin ^
     -log-commands ^
     -persistent-users ^
@@ -506,11 +549,23 @@ shell2telegram \
 ```
 
 ### 8. Работа с конфиденциальными данными
+
+**✅ ПРАВИЛЬНО - Используйте переменные окружения (автоматически):**
 ```bash
-# НЕ передавайте пароли в параметрах! Используйте переменные:
+# Устанавливаем переменные окружения
+export PROXY_SERVER="proxy.company.com:8080"
+export PROXY_USER="username"
 export PROXY_PASSWORD="secret"
 export TB_TOKEN="bot_token"
-shell2telegram -proxy-password="$PROXY_PASSWORD" /cmd 'command'
+
+# Запуск - переменные используются АВТОМАТИЧЕСКИ!
+shell2telegram /status 'uptime'
+```
+
+**❌ НЕПРАВИЛЬНО - Пароли в параметрах командной строки:**
+```bash
+# Пароли ВИДНЫ в списке процессов (ps aux / tasklist)
+shell2telegram -proxy-password="secret" /cmd 'command'
 ```
 
 ## 🐛 Troubleshooting

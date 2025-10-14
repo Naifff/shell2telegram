@@ -81,10 +81,42 @@ Get token from [BotFather bot](https://telegram.me/BotFather), and set TB_TOKEN 
         -public              : bot is public (don't add /auth* commands)
         -sh-timeout=N        : set timeout for execute shell command (in seconds)
         -shell="shell"       : shell for execute command, "" - without shell (default "sh")
+        -proxy-server=<ADDR> : proxy server address (host:port or http://host:port), optional if PROXY_SERVER env var is set
+        -proxy-user=<USER>   : proxy username, optional if PROXY_USER env var is set
+        -proxy-password=<PWD>: proxy password, optional if PROXY_PASSWORD env var is set
         -version
         -help
 
 If not define -allow-users/-root-users options - authorize users via secret code from console or via chat with exists root users.
+
+Proxy support
+-------------
+
+shell2telegram supports corporate proxies with automatic environment variable detection:
+
+**Recommended: Using environment variables (secure)**
+
+    export PROXY_SERVER=proxy.company.com:8080
+    export PROXY_USER=username
+    export PROXY_PASSWORD=password
+    export TB_TOKEN=your_token
+
+    # Proxy is automatically used - no flags needed!
+    shell2telegram /date 'date'
+
+**Standard proxy variables (compatibility)**
+
+    export HTTP_PROXY=http://username:password@proxy:8080
+    export TB_TOKEN=your_token
+    shell2telegram /date 'date'
+
+**Command-line flags (less secure - visible in process list)**
+
+    shell2telegram -proxy-server=proxy:8080 -proxy-user=user -proxy-password=pass /date 'date'
+
+**Priority order:** Command-line flags > PROXY_* env vars > HTTP_PROXY/http_proxy/HTTPS_PROXY/https_proxy env vars
+
+See [QUICKSTART.md](QUICKSTART.md) for quick guide, [PROXY_README.md](PROXY_README.md) for detailed proxy documentation, or [README_RU.md](README_RU.md) for comprehensive Russian documentation.
 
 All text after /chat_command will be sent to STDIN of shell command.
 
