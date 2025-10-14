@@ -47,6 +47,8 @@ echo ========================================
 echo.
 
 REM Запуск бота с командами для Windows Server
+REM ВАЖНО: Переменные окружения PROXY_SERVER, PROXY_USER, PROXY_PASSWORD и TB_TOKEN
+REM        используются АВТОМАТИЧЕСКИ! Не нужно передавать их через параметры!
 shell2telegram.exe ^
     -log-commands ^
     -log=bot.log ^
