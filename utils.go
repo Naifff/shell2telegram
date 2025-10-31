@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -19,6 +20,7 @@ import (
 	shellwords "github.com/mattn/go-shellwords"
 	"github.com/msoap/raphanus"
 	raphanuscommon "github.com/msoap/raphanus/common"
+	tgbotapi "gopkg.in/telegram-bot-api.v2"
 )
 
 // codeBytesLength - length of random code in bytes
@@ -107,6 +109,101 @@ func execShell(shellCmd, input string, varsNames []string, userID, chatID int, u
 	return result
 }
 
+// execShellWithFile - wrapper for execShell with file upload support
+// Returns: (output []byte, executionTime int64, success bool)
+func execShellWithFile(shellCmd, input string, varsNames []string, userID, chatID int, userName, userDisplayName string, cache *raphanus.DB, cacheTTL int, config *Config, uploadedFile string) (result []byte, executionTimeMs int64, success bool) {
+	startTime := time.Now()
+	// If file was uploaded, add it to cache key and environment
+	cacheKey := shellCmd + "/" + input
+	if uploadedFile != "" {
+		cacheKey += "/" + uploadedFile
+	}
+
+	// For caching with uploaded files
+	if cacheTTL > 0 && uploadedFile != "" {
+		if cacheData, err := cache.GetBytes(cacheKey); err != raphanuscommon.ErrKeyNotExists && err != nil {
+			log.Printf("get from cache failed: %s", err)
+		} else if err == nil {
+			executionTimeMs = time.Since(startTime).Milliseconds()
+			return cacheData, executionTimeMs, true
+		}
+	}
+
+	shell, params, err := getShellAndParams(shellCmd, config.shell, runtime.GOOS == "windows")
+	if err != nil {
+		log.Print("parse shell failed: ", err)
+		return nil, 0, false
+	}
+
+	ctx := context.Background()
+	if config.shTimeout > 0 {
+		var cancelFn context.CancelFunc
+		ctx, cancelFn = context.WithTimeout(ctx, time.Duration(config.shTimeout)*time.Second)
+		defer cancelFn()
+	}
+
+	osExecCommand := exec.CommandContext(ctx, shell, params...)
+	osExecCommand.Stderr = os.Stderr
+	osExecCommand.Env = append(osExecCommand.Env, os.Environ()...)
+
+	if input != "" {
+		if len(varsNames) > 0 {
+			arguments := regexp.MustCompile(`\s+`).Split(input, len(varsNames))
+			for i, arg := range arguments {
+				osExecCommand.Env = append(osExecCommand.Env, fmt.Sprintf("%s=%s", varsNames[i], arg))
+			}
+		} else {
+			var stdin io.WriteCloser
+			errExec := errChain(func() (err error) {
+				stdin, err = osExecCommand.StdinPipe()
+				return err
+			}, func() error {
+				_, err = io.WriteString(stdin, input)
+				return err
+			}, func() error {
+				return stdin.Close()
+			})
+			if errExec != nil {
+				log.Print("get STDIN error: ", err)
+			}
+		}
+	}
+
+	// set S2T_* env vars
+	s2tVariables := [...]struct{ name, value string }{
+		{"S2T_LOGIN", userName},
+		{"S2T_USERID", strconv.Itoa(userID)},
+		{"S2T_USERNAME", userDisplayName},
+		{"S2T_CHATID", strconv.Itoa(chatID)},
+		{"S2T_FILE_PATH", uploadedFile},
+	}
+	for _, row := range s2tVariables {
+		if row.value != "" { // Only set non-empty values
+			osExecCommand.Env = append(osExecCommand.Env, fmt.Sprintf("%s=%s", row.name, row.value))
+		}
+	}
+
+	shellOut, err := osExecCommand.Output()
+	executionTimeMs = time.Since(startTime).Milliseconds()
+
+	if err != nil {
+		log.Print("exec error: ", err)
+		result = []byte(fmt.Sprintf("exec error: %s", err))
+		return result, executionTimeMs, false
+	} else {
+		result = shellOut
+		success = true
+	}
+
+	if cacheTTL > 0 {
+		if err := cache.SetBytes(cacheKey, result, cacheTTL); err != nil {
+			log.Printf("set to cache failed: %s", err)
+		}
+	}
+
+	return result, executionTimeMs, success
+}
+
 // errChain - handle errors on few functions
 func errChain(chainFuncs ...func() error) error {
 	for _, fn := range chainFuncs {
@@ -159,6 +256,8 @@ func parseBotCommand(pathRaw, shellCmd string) (path string, command Command, er
 			oneVarParts := regexp.MustCompile("=").Split(oneVar, 2)
 			if len(oneVarParts) == 1 && oneVarParts[0] == "md" {
 				command.isMarkdown = true
+			} else if len(oneVarParts) == 1 && oneVarParts[0] == "file" {
+				command.isFile = true
 			} else if len(oneVarParts) != 2 {
 				err = fmt.Errorf("error: parse command modificators: %s", oneVar)
 				return
@@ -176,6 +275,9 @@ func parseBotCommand(pathRaw, shellCmd string) (path string, command Command, er
 						return
 					}
 				}
+			} else if oneVarParts[0] == "buttons" {
+				// Note: buttons modifier requires telegram-bot-api v5+ (future enhancement)
+				log.Printf("Warning: :buttons modifier is not supported yet (requires telegram-bot-api v5+)")
 			} else {
 				err = fmt.Errorf("error: parse command modificators, not found %s", oneVarParts[0])
 				return
@@ -324,4 +426,83 @@ func (v urlValue) Set(s string) error {
 
 	*v.URL = *u
 	return nil
+}
+
+// ------------------------------
+// cleanupOldFiles - remove old uploaded files
+func cleanupOldFiles(dir string, maxAge int) {
+	files, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+
+	now := time.Now()
+	for _, file := range files {
+		if file.IsDir() {
+			continue
+		}
+
+		info, err := file.Info()
+		if err != nil {
+			continue
+		}
+
+		age := now.Sub(info.ModTime()).Seconds()
+		if age > float64(maxAge) {
+			filePath := dir + string(os.PathSeparator) + file.Name()
+			os.Remove(filePath)
+			log.Printf("Removed old file: %s (age: %.0fs)", filePath, age)
+		}
+	}
+}
+
+// downloadFile - download file from Telegram and save it to temp directory
+func downloadFile(bot interface{}, fileID string, dir string) (string, error) {
+	// Get file info from Telegram
+	type BotAPI interface {
+		GetFile(tgbotapi.FileConfig) (tgbotapi.File, error)
+		GetFileDirectURL(string) (string, error)
+	}
+
+	botAPI, ok := bot.(BotAPI)
+	if !ok {
+		return "", fmt.Errorf("invalid bot type")
+	}
+
+	file, err := botAPI.GetFile(tgbotapi.FileConfig{FileID: fileID})
+	if err != nil {
+		return "", fmt.Errorf("failed to get file info: %v", err)
+	}
+
+	// Get download URL
+	fileURL, err := botAPI.GetFileDirectURL(file.FileID)
+	if err != nil {
+		return "", fmt.Errorf("failed to get file URL: %v", err)
+	}
+
+	// Download file
+	response, err := http.Get(fileURL)
+	if err != nil {
+		return "", fmt.Errorf("failed to download file: %v", err)
+	}
+	defer response.Body.Close()
+
+	// Generate unique filename
+	fileName := fmt.Sprintf("%d_%s", time.Now().Unix(), file.FilePath[strings.LastIndex(file.FilePath, "/")+1:])
+	filePath := dir + string(os.PathSeparator) + fileName
+
+	// Save file
+	outFile, err := os.Create(filePath)
+	if err != nil {
+		return "", fmt.Errorf("failed to create file: %v", err)
+	}
+	defer outFile.Close()
+
+	_, err = io.Copy(outFile, response.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to write file: %v", err)
+	}
+
+	log.Printf("Downloaded file: %s", filePath)
+	return filePath, nil
 }

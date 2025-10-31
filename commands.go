@@ -2,12 +2,16 @@ package main
 
 import (
 	"fmt"
+	"io/ioutil"
 	"log"
+	"os"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/msoap/raphanus"
+	// tgbotapi "gopkg.in/telegram-bot-api.v2" // inline keyboards not supported in v2
 )
 
 // Ctx - context for bot command function (users, command, args, ...)
@@ -25,6 +29,8 @@ type Ctx struct {
 	cache          *raphanus.DB      // cache for commands output
 	cacheTTL       int               // cache timeout
 	oneThreadMutex *sync.Mutex       // mutex for run shell commands in one thread
+	uploadedFile   string            // path to uploaded file (if any)
+	database       *Database         // database for logging
 }
 
 // /auth and /authroot - authorize users
@@ -84,6 +90,13 @@ func cmdHelp(ctx Ctx) (replayMsg string) {
 		)
 	}
 
+	if ctx.allowExec {
+		helpMsg = append(helpMsg,
+			"/history → show recent command history",
+			"/history export → export full history to file",
+		)
+	}
+
 	if ctx.users.IsRoot(ctx.userID) {
 		helpMsgForRoot := []string{
 			"/shell2telegram ban <user_id|username> → ban user",
@@ -122,7 +135,7 @@ func cmdUser(ctx Ctx) {
 			if ctx.appConfig.oneThread {
 				ctx.oneThreadMutex.Lock()
 			}
-			replayMsgRaw := execShell(
+			replayMsgRaw, executionTime, success := execShellWithFile(
 				cmd.shellCmd,
 				ctx.messageArgs,
 				ctx.commands[ctx.messageCmd].vars,
@@ -133,12 +146,28 @@ func cmdUser(ctx Ctx) {
 				ctx.cache,
 				ctx.cacheTTL,
 				ctx.appConfig,
+				ctx.uploadedFile,
 			)
 			if ctx.appConfig.oneThread {
 				ctx.oneThreadMutex.Unlock()
 			}
 
-			sendMessage(ctx.messageSignal, ctx.chatID, replayMsgRaw, cmd.isMarkdown)
+			// Log to database if enabled
+			if ctx.database != nil {
+				ctx.database.LogCommand(
+					ctx.userID,
+					ctx.users.list[ctx.userID].UserName,
+					ctx.messageCmd,
+					ctx.messageArgs,
+					replayMsgRaw,
+					executionTime,
+					success,
+				)
+			}
+
+			// Note: Inline keyboard feature requires telegram-bot-api v5+ (future enhancement)
+
+			sendMessage(ctx.messageSignal, ctx.chatID, replayMsgRaw, cmd.isMarkdown, cmd.isFile)
 		}()
 	}
 }
@@ -270,3 +299,189 @@ func cmdShell2telegramMessageToUser(ctx Ctx) (replayMsg string) {
 
 	return replayMsg
 }
+
+// cmdHistory - show command history for user
+func cmdHistory(ctx Ctx) (replayMsg string) {
+	user, ok := ctx.users.list[ctx.userID]
+	if !ok {
+		return "User not found"
+	}
+
+	subCmd := strings.TrimSpace(ctx.messageArgs)
+
+	// Export history to file
+	if subCmd == "export" {
+		if len(user.History) == 0 {
+			return "No command history to export"
+		}
+
+		var historyText string
+		historyText = fmt.Sprintf("Command History for %s\n", ctx.users.String(ctx.userID))
+		historyText += fmt.Sprintf("Total entries: %d\n\n", len(user.History))
+
+		for i, entry := range user.History {
+			status := "✓"
+			if !entry.Success {
+				status = "✗"
+			}
+			historyText += fmt.Sprintf("%d. [%s] %s %s %s\n   %s\n\n",
+				i+1,
+				entry.Timestamp.Format("2006-01-02 15:04:05"),
+				status,
+				entry.Command,
+				entry.Arguments,
+				"---",
+			)
+		}
+
+		// Save to temp file
+		fileName := fmt.Sprintf("history_%d_%d.txt", ctx.userID, time.Now().Unix())
+		filePath := TempFilesDir + string(os.PathSeparator) + fileName
+		err := ioutil.WriteFile(filePath, []byte(historyText), 0644)
+		if err != nil {
+			return fmt.Sprintf("Error creating history file: %s", err)
+		}
+
+		// Return file path with FILE: prefix to trigger file sending
+		return "FILE:" + filePath
+	}
+
+	// Show last 10 commands with inline buttons to repeat
+	if len(user.History) == 0 {
+		return "No command history yet"
+	}
+
+	replayMsg = "Recent command history:\n\n"
+
+	// Get last 10 entries
+	start := 0
+	if len(user.History) > 10 {
+		start = len(user.History) - 10
+	}
+
+	for i := start; i < len(user.History); i++ {
+		entry := user.History[i]
+		status := "✓"
+		if !entry.Success {
+			status = "✗"
+		}
+		replayMsg += fmt.Sprintf("%d. [%s] %s %s %s\n",
+			i-start+1,
+			entry.Timestamp.Format("15:04:05"),
+			status,
+			entry.Command,
+			entry.Arguments,
+		)
+	}
+
+	return replayMsg
+}
+
+// /shell2telegram logs - show recent command logs from database
+func cmdShell2telegramLogs(ctx Ctx) (replayMsg string) {
+	if ctx.database == nil {
+		return "Database logging is not enabled. Use -enable-db-logging flag"
+	}
+
+	limit := 20
+	if ctx.messageArgs != "" {
+		fmt.Sscanf(ctx.messageArgs, "%d", &limit)
+	}
+	if limit > 100 {
+		limit = 100
+	}
+
+	logs, err := ctx.database.GetRecentLogs(limit)
+	if err != nil {
+		return fmt.Sprintf("Error fetching logs: %v", err)
+	}
+
+	if len(logs) == 0 {
+		return "No logs found"
+	}
+
+	replayMsg = fmt.Sprintf("Recent %d command logs:\n\n", len(logs))
+	for _, log := range logs {
+		status := "✓"
+		if !log.Success {
+			status = "✗"
+		}
+		replayMsg += fmt.Sprintf("[%s] %s %s\n@%s: %s %s\nTime: %dms\n\n",
+			log.Timestamp.Format("2006-01-02 15:04"),
+			status,
+			log.Command,
+			log.Username,
+			log.Command,
+			log.Arguments,
+			log.ExecutionTime,
+		)
+	}
+
+	return replayMsg
+}
+
+// /shell2telegram search_logs - search logs by keyword
+func cmdShell2telegramSearchLogs(ctx Ctx) (replayMsg string) {
+	if ctx.database == nil {
+		return "Database logging is not enabled. Use -enable-db-logging flag"
+	}
+
+	keyword := ctx.messageArgs
+	if keyword == "" {
+		return "Usage: /shell2telegram search_logs <keyword>"
+	}
+
+	logs, err := ctx.database.SearchLogs(keyword, 20)
+	if err != nil {
+		return fmt.Sprintf("Error searching logs: %v", err)
+	}
+
+	if len(logs) == 0 {
+		return fmt.Sprintf("No logs found matching '%s'", keyword)
+	}
+
+	replayMsg = fmt.Sprintf("Found %d logs matching '%s':\n\n", len(logs), keyword)
+	for _, log := range logs {
+		status := "✓"
+		if !log.Success {
+			status = "✗"
+		}
+		replayMsg += fmt.Sprintf("[%s] %s %s\n@%s: %s %s\n\n",
+			log.Timestamp.Format("2006-01-02 15:04"),
+			status,
+			log.Command,
+			log.Username,
+			log.Command,
+			log.Arguments,
+		)
+	}
+
+	return replayMsg
+}
+
+// /shell2telegram db_stats - show database statistics
+func cmdShell2telegramDBStats(ctx Ctx) (replayMsg string) {
+	if ctx.database == nil {
+		return "Database logging is not enabled. Use -enable-db-logging flag"
+	}
+
+	stats, err := ctx.database.GetStats()
+	if err != nil {
+		return fmt.Sprintf("Error fetching stats: %v", err)
+	}
+
+	replayMsg = "Database Statistics:\n\n"
+	replayMsg += fmt.Sprintf("Total commands: %d\n", stats["total_commands"])
+	replayMsg += fmt.Sprintf("Successful: %d\n", stats["successful_commands"])
+	replayMsg += fmt.Sprintf("Success rate: %.2f%%\n", stats["success_rate"])
+	replayMsg += fmt.Sprintf("Avg execution time: %.2f ms\n", stats["avg_execution_time_ms"])
+
+	if mostUsed, ok := stats["most_used_command"]; ok {
+		replayMsg += fmt.Sprintf("\nMost used command: %s (%d times)\n", mostUsed, stats["most_used_count"])
+	}
+
+	return replayMsg
+}
+
+// Note: Inline keyboard feature (generateInlineKeyboard) requires telegram-bot-api v5+
+// This is left as a future enhancement when the library is upgraded

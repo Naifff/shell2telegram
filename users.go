@@ -12,19 +12,28 @@ import (
 	tgbotapi "gopkg.in/telegram-bot-api.v2"
 )
 
+// CommandHistoryEntry - one entry in command history
+type CommandHistoryEntry struct {
+	Timestamp time.Time `json:"timestamp"`
+	Command   string    `json:"command"`
+	Arguments string    `json:"arguments"`
+	Success   bool      `json:"success"`
+}
+
 // User - one telegram user who interact with bot
 type User struct {
-	UserID         int       `json:"user_id"`          // telegram UserID
-	UserName       string    `json:"user_name"`        // telegram @login
-	FirstName      string    `json:"first_name"`       // telegram name
-	LastName       string    `json:"last_name"`        // -//-
-	AuthCode       string    `json:"auth_code"`        // code for authorize
-	AuthCodeRoot   string    `json:"auth_code_root"`   // code for authorize root
-	IsAuthorized   bool      `json:"is_authorized"`    // user allow chat with bot
-	IsRoot         bool      `json:"is_root"`          // user is root, allow authorize/ban other users, remove commands, stop bot
-	PrivateChatID  int       `json:"private_chat_id"`  // last private chat with bot
-	Counter        int       `json:"counter"`          // how many commands send
-	LastAccessTime time.Time `json:"last_access_time"` // time of last command
+	UserID         int                    `json:"user_id"`          // telegram UserID
+	UserName       string                 `json:"user_name"`        // telegram @login
+	FirstName      string                 `json:"first_name"`       // telegram name
+	LastName       string                 `json:"last_name"`        // -//-
+	AuthCode       string                 `json:"auth_code"`        // code for authorize
+	AuthCodeRoot   string                 `json:"auth_code_root"`   // code for authorize root
+	IsAuthorized   bool                   `json:"is_authorized"`    // user allow chat with bot
+	IsRoot         bool                   `json:"is_root"`          // user is root, allow authorize/ban other users, remove commands, stop bot
+	PrivateChatID  int                    `json:"private_chat_id"`  // last private chat with bot
+	Counter        int                    `json:"counter"`          // how many commands send
+	LastAccessTime time.Time              `json:"last_access_time"` // time of last command
+	History        []CommandHistoryEntry  `json:"history"`          // command history (last 50 commands)
 }
 
 // Users in chat
@@ -159,7 +168,7 @@ func (users Users) IsRoot(userID int) bool {
 func (users Users) BroadcastForRoots(messageSignal chan<- BotMessage, message string, excludeID int) {
 	for userID, user := range users.list {
 		if user.IsRoot && user.PrivateChatID > 0 && (excludeID == 0 || excludeID != userID) {
-			sendMessage(messageSignal, user.PrivateChatID, []byte(message), false)
+			sendMessage(messageSignal, user.PrivateChatID, []byte(message), false, false)
 		}
 	}
 }
@@ -265,7 +274,7 @@ func (users Users) FindByIDOrUserName(userName string) int {
 // SendMessageToPrivate - send message to user to private chat
 func (users Users) SendMessageToPrivate(messageSignal chan<- BotMessage, userID int, message string) bool {
 	if user, ok := users.list[userID]; ok && user.PrivateChatID > 0 {
-		sendMessage(messageSignal, user.PrivateChatID, []byte(message), false)
+		sendMessage(messageSignal, user.PrivateChatID, []byte(message), false, false)
 		return true
 	}
 	return false
@@ -317,5 +326,26 @@ func (users *Users) SaveToDB(usersDBFile string) {
 		} else {
 			log.Printf("Save usersDB (%s) error: %s", fileNamePath, err)
 		}
+	}
+}
+
+// AddToHistory - add command to user's history (keep last 50 entries)
+func (users *Users) AddToHistory(userID int, command, arguments string, success bool) {
+	if user, ok := users.list[userID]; ok {
+		entry := CommandHistoryEntry{
+			Timestamp: time.Now(),
+			Command:   command,
+			Arguments: arguments,
+			Success:   success,
+		}
+
+		user.History = append(user.History, entry)
+
+		// Keep only last 50 entries
+		if len(user.History) > 50 {
+			user.History = user.History[len(user.History)-50:]
+		}
+
+		users.needSaveDB = true
 	}
 }

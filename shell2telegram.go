@@ -35,6 +35,12 @@ const (
 	// DBFileName - DB json name
 	DBFileName = "shell2telegram.json"
 
+	// TempFilesDir - temporary directory for uploaded files
+	TempFilesDir = "/tmp/shell2telegram_files"
+
+	// MaxFileAge - max age for temp files in seconds (1 hour)
+	MaxFileAge = 3600
+
 	// shell2telegram command name for get plain text without /command
 	cmdPlainText = "/:plain_text"
 )
@@ -45,6 +51,8 @@ type Command struct {
 	description string   // command description for list in /help (/cmd:desc="Command name")
 	vars        []string // environment vars for user text, split by `/s+` to vars (/cmd:vars=SUBCOMMAND,ARGS)
 	isMarkdown  bool     // send message in markdown format
+	isFile      bool     // command output is a file path - send file to user
+	// buttons - inline buttons feature requires telegram-bot-api v5+ (future enhancement)
 }
 
 // Commands - list of all commands
@@ -72,22 +80,27 @@ type Config struct {
 	persistentUsers        bool     // load/save users from file
 	isPublicBot            bool     // bot is public (don't add /auth* commands)
 	oneThread              bool     // run each shell commands in one thread
+	enableDBLogging        bool     // enable database logging
+	dbPath                 string   // path to SQLite database
 }
 
 // message types
 const (
 	msgIsText int8 = iota
 	msgIsPhoto
+	msgIsDocument
 )
 
 // BotMessage - record for send via channel for send message to telegram chat
 type BotMessage struct {
 	message     string
 	fileName    string
+	filePath    string // path to file for sending as document
 	photo       []byte
 	chatID      int
 	messageType int8
 	isMarkdown  bool
+	// keyboard - inline keyboard requires telegram-bot-api v5+ (future enhancement)
 }
 
 // ----------------------------------------------------------------------------
@@ -111,6 +124,8 @@ func getConfig() (commands Commands, appConfig Config, err error) {
 	flag.StringVar(&appConfig.proxyServer, "proxy-server", "", "proxy server `address` (host:port or http://host:port)")
 	flag.StringVar(&appConfig.proxyUser, "proxy-user", "", "proxy `username`")
 	flag.StringVar(&appConfig.proxyPassword, "proxy-password", "", "proxy `password`")
+	flag.BoolVar(&appConfig.enableDBLogging, "enable-db-logging", false, "enable SQLite database logging of all commands")
+	flag.StringVar(&appConfig.dbPath, "db-path", "", "`path` to SQLite database file (default ~/.config/shell2telegram.db)")
 	logFilename := flag.String("log", "", "log `filename`, default - STDOUT")
 	predefinedAllowedUsers := flag.String("allow-users", "", "telegram users who are allowed to chat with the bot (\"user1,user2\")")
 	predefinedRootUsers := flag.String("root-users", "", "telegram users, who confirms new users in their private chat (\"user1,user2\")")
@@ -207,8 +222,26 @@ func getConfig() (commands Commands, appConfig Config, err error) {
 }
 
 // ----------------------------------------------------------------------------
-func sendMessage(messageSignal chan<- BotMessage, chatID int, message []byte, isMarkdown bool) {
+func sendMessage(messageSignal chan<- BotMessage, chatID int, message []byte, isMarkdown bool, isFileOutput bool) {
 	go func() {
+		messageString := string(message)
+
+		// Check if output is a file path (for :file modifier or FILE: prefix)
+		if isFileOutput || strings.HasPrefix(messageString, "FILE:") {
+			filePath := messageString
+			if strings.HasPrefix(messageString, "FILE:") {
+				filePath = strings.TrimSpace(strings.TrimPrefix(messageString, "FILE:"))
+			}
+
+			// Send as document
+			messageSignal <- BotMessage{
+				chatID:      chatID,
+				messageType: msgIsDocument,
+				filePath:    filePath,
+			}
+			return
+		}
+
 		var fileName string
 		fileType := http.DetectContentType(message)
 		switch fileType {
@@ -230,7 +263,6 @@ func sendMessage(messageSignal chan<- BotMessage, chatID int, message []byte, is
 
 		if fileName == "message" {
 			// is text message
-			messageString := string(message)
 			var messagesList []string
 
 			if len(messageString) <= MaxMessageLength {
@@ -306,6 +338,10 @@ func createBotWithProxy(token string, config *Config) (*tgbotapi.BotAPI, error) 
 }
 
 // ----------------------------------------------------------------------------
+// Note: handleCallbackQuery for inline buttons requires telegram-bot-api v5+
+// This feature is left as a future enhancement when the library is upgraded
+
+// ----------------------------------------------------------------------------
 func main() {
 	commands, appConfig, err := getConfig()
 	if err != nil {
@@ -361,6 +397,17 @@ func main() {
 		cache = raphanus.New()
 	}
 
+	// Initialize database if logging is enabled
+	var database *Database
+	if appConfig.enableDBLogging {
+		database, err = InitDatabase(appConfig.dbPath)
+		if err != nil {
+			log.Printf("Failed to initialize database: %v. Continuing without DB logging.", err)
+		} else {
+			defer database.Close()
+		}
+	}
+
 	// all /shell2telegram sub-commands handlers
 	internalCommands := map[string]func(Ctx) string{
 		"stat":              cmdShell2telegramStat,
@@ -372,16 +419,36 @@ func main() {
 		"version":           cmdShell2telegramVersion,
 		"broadcast_to_root": cmdShell2telegramBroadcastToRoot,
 		"message_to_user":   cmdShell2telegramMessageToUser,
+		"logs":              cmdShell2telegramLogs,
+		"search_logs":       cmdShell2telegramSearchLogs,
+		"db_stats":          cmdShell2telegramDBStats,
 	}
+
+	// Create temp directory for uploaded files
+	createDirIfNeed(TempFilesDir)
+
+	// Cleanup old files ticker
+	fileCleanupTicker := time.Tick(MaxFileAge * time.Second)
 
 	doExit := false
 	for !doExit {
 		select {
 		case telegramUpdate := <-botUpdatesChan:
+			// Note: Callback query handling for inline buttons requires telegram-bot-api v5+ (future)
+
+			// Skip if no message
+			if telegramUpdate.Message.MessageID == 0 {
+				continue
+			}
 
 			var messageCmd, messageArgs string
 			allUserMessage := telegramUpdate.Message.Text
-			if len(allUserMessage) > 0 && allUserMessage[0] == '/' {
+
+			// Handle document upload
+			if telegramUpdate.Message.Document.FileID != "" {
+				messageCmd = cmdPlainText // Will be processed as plain text if /:plain_text command exists
+				allUserMessage = ""        // Document will be handled separately
+			} else if len(allUserMessage) > 0 && allUserMessage[0] == '/' {
 				messageCmd, messageArgs = splitStringHalfBySpace(allUserMessage)
 			} else {
 				messageCmd, messageArgs = cmdPlainText, allUserMessage
@@ -400,6 +467,19 @@ func main() {
 				userID := telegramUpdate.Message.From.ID
 				allowExec := appConfig.allowAll || users.IsAuthorized(userID)
 
+				// Download file if document was uploaded
+				var uploadedFilePath string
+				if telegramUpdate.Message.Document.FileID != "" && allowExec {
+					filePath, err := downloadFile(bot, telegramUpdate.Message.Document.FileID, TempFilesDir)
+					if err != nil {
+						log.Printf("Failed to download file: %s", err)
+						sendMessage(messageSignal, telegramUpdate.Message.Chat.ID, []byte(fmt.Sprintf("Error downloading file: %s", err)), false, false)
+						continue
+					}
+					uploadedFilePath = filePath
+					log.Printf("File uploaded by %s: %s", users.String(userID), filePath)
+				}
+
 				ctx := Ctx{
 					appConfig:      &appConfig,
 					users:          &users,
@@ -413,6 +493,8 @@ func main() {
 					exitSignal:     exitSignal,
 					cache:          &cache,
 					oneThreadMutex: &oneThreadMutex,
+					uploadedFile:   uploadedFilePath,
+					database:       database,
 				}
 
 				switch {
@@ -422,6 +504,9 @@ func main() {
 
 				case messageCmd == "/help":
 					replayMsg = cmdHelp(ctx)
+
+				case allowExec && messageCmd == "/history":
+					replayMsg = cmdHistory(ctx)
 
 				case messageCmd == "/shell2telegram" && users.IsRoot(userID):
 					var messageSubCmd string
@@ -434,6 +519,8 @@ func main() {
 					}
 
 				case allowExec && (allowPlainText && messageCmd == cmdPlainText || messageCmd[0] == '/'):
+					// Record command execution
+					users.AddToHistory(userID, messageCmd, messageArgs, true)
 					cmdUser(ctx)
 
 				} // switch for commands
@@ -442,7 +529,7 @@ func main() {
 					log.Printf("%s: %s", users.String(userID), allUserMessage)
 				}
 
-				sendMessage(messageSignal, telegramUpdate.Message.Chat.ID, []byte(replayMsg), false)
+				sendMessage(messageSignal, telegramUpdate.Message.Chat.ID, []byte(replayMsg), false, false)
 			}
 
 		case botMessage := <-messageSignal:
@@ -452,15 +539,28 @@ func main() {
 				if botMessage.isMarkdown {
 					messageConfig.ParseMode = tgbotapi.ModeMarkdown
 				}
+				// Note: Inline keyboard support requires telegram-bot-api v5+
 				_, err = bot.Send(messageConfig)
 			case botMessage.messageType == msgIsPhoto && len(botMessage.photo) > 0:
 				bytesPhoto := tgbotapi.FileBytes{Name: botMessage.fileName, Bytes: botMessage.photo}
 				_, err = bot.Send(tgbotapi.NewPhotoUpload(botMessage.chatID, bytesPhoto))
+			case botMessage.messageType == msgIsDocument && botMessage.filePath != "":
+				// Send file as document
+				_, err = bot.Send(tgbotapi.NewDocumentUpload(botMessage.chatID, botMessage.filePath))
+				if err != nil {
+					// If file sending failed, try to send error message
+					log.Printf("failed to send document %s: %s", botMessage.filePath, err)
+					errorMsg := fmt.Sprintf("Error: cannot send file '%s': %s", botMessage.filePath, err)
+					bot.Send(tgbotapi.NewMessage(botMessage.chatID, errorMsg))
+				}
 			}
 
 			if err != nil {
 				log.Printf("failed to send message: %s", err)
 			}
+
+		case <-fileCleanupTicker:
+			cleanupOldFiles(TempFilesDir, MaxFileAge)
 
 		case <-saveToBDTicker:
 			users.SaveToDB(appConfig.usersDB)

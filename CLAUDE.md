@@ -70,8 +70,11 @@ go run . -tb-token=YOUR_TOKEN [options] /command 'shell command'
 
 ### Key Features
 
-- **Command modifiers**: `/cmd:desc="Description"`, `/cmd:vars=VAR1,VAR2`, `/cmd:md` for markdown
+- **Command modifiers**: `/cmd:desc="Description"`, `/cmd:vars=VAR1,VAR2`, `/cmd:md` for markdown, `/cmd:file` for file output
 - **Special commands**: `/:plain_text` captures all non-command messages in private chats
+- **File handling**: Upload files to bot (accessible via `$S2T_FILE_PATH`), download files using `:file` modifier or `FILE:` prefix
+- **Command history**: Track last 50 commands per user, view with `/history`, export with `/history export`
+- **Database logging**: SQLite logging with `--enable-db-logging`, query logs and stats via `/shell2telegram logs/search_logs/db_stats`
 - **Security**: Three-tier access (unauthorized, authorized, root), with optional `-allow-all` for public bots
 - **Caching**: Command output caching with TTL (`-cache=N`)
 - **Threading**: Optional single-threaded execution (`-one-thread`)
