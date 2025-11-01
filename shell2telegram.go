@@ -43,6 +43,9 @@ const (
 
 	// shell2telegram command name for get plain text without /command
 	cmdPlainText = "/:plain_text"
+
+	// shell2telegram command name for automatic file processing
+	cmdFile = "/:file"
 )
 
 // Command - one user command
@@ -444,24 +447,36 @@ func main() {
 			var messageCmd, messageArgs string
 			allUserMessage := telegramUpdate.Message.Text
 
+			// Check if special commands are defined
+			allowPlainText := false
+			if _, ok := commands[cmdPlainText]; ok {
+				allowPlainText = true
+			}
+
+			allowFile := false
+			if _, ok := commands[cmdFile]; ok {
+				allowFile = true
+			}
+
 			// Handle document upload
 			if telegramUpdate.Message.Document.FileID != "" {
-				messageCmd = cmdPlainText // Will be processed as plain text if /:plain_text command exists
-				allUserMessage = ""        // Document will be handled separately
+				// If /:file command exists, use it for files
+				if allowFile {
+					messageCmd = cmdFile
+				} else if allowPlainText {
+					// Fallback to /:plain_text for backward compatibility
+					messageCmd = cmdPlainText
+				}
+				allUserMessage = "" // Document will be handled separately
 			} else if len(allUserMessage) > 0 && allUserMessage[0] == '/' {
 				messageCmd, messageArgs = splitStringHalfBySpace(allUserMessage)
 			} else {
 				messageCmd, messageArgs = cmdPlainText, allUserMessage
 			}
 
-			allowPlainText := false
-			if _, ok := commands[cmdPlainText]; ok {
-				allowPlainText = true
-			}
-
 			replayMsg := ""
 
-			if len(messageCmd) > 0 && (messageCmd != cmdPlainText || allowPlainText) {
+			if len(messageCmd) > 0 && (messageCmd != cmdPlainText || allowPlainText) && (messageCmd != cmdFile || allowFile) {
 
 				users.AddNew(telegramUpdate.Message)
 				userID := telegramUpdate.Message.From.ID

@@ -292,8 +292,8 @@ func parseBotCommand(pathRaw, shellCmd string) (path string, command Command, er
 	case len(pathParts) == 1:
 		// /, /cmd
 		path = pathParts[0]
-	case pathParts[0] == "/" && regexp.MustCompile("^(plain_text|image)$").MatchString(pathParts[1]):
-		// /:plain_text, /:image, /:plain_text:desc=name
+	case pathParts[0] == "/" && regexp.MustCompile("^(plain_text|file|image)$").MatchString(pathParts[1]):
+		// /:plain_text, /:file, /:image, /:plain_text:desc=name
 		path = "/:" + pathParts[1]
 		if pathParts[1] == "image" {
 			return "", command, fmt.Errorf("/:image not implemented")
